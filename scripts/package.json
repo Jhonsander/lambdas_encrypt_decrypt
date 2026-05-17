@@ -1,0 +1,10 @@
+{
+  "name": "scripts",
+  "version": "1.0.0",
+  "description": "CLI script for generating RSA key pairs and storing them in AWS Secrets Manager",
+  "main": "generate-keys.js",
+  "dependencies": {
+    "jose": "^5.0.0",
+    "@aws-sdk/client-secrets-manager": "^3.0.0"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "jose-encryptor",
+  "version": "1.0.0",
+  "description": "AWS Lambda function for JWE payload encryption using RSA-OAEP-256 + AES-256-GCM",
+  "main": "src/handler.js",
+  "scripts": {
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand"
+  },
+  "dependencies": {
+    "jose": "^5.0.0",
+    "@aws-sdk/client-secrets-manager": "^3.0.0"
+  },
+  "devDependencies": {
+    "jest": "^29.0.0",
+    "fast-check": "^3.0.0"
+  },
+  "jest": {
+    "testEnvironment": "node"
+  }
+}
