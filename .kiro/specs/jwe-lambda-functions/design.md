@@ -1,6 +1,6 @@
 # Documento de Diseño Técnico: jwe-lambda-functions
 
-## Visión General
+## Overview
 
 Este documento describe el diseño técnico de dos funciones AWS Lambda que implementan cifrado y descifrado de payloads usando el estándar **JWE (JSON Web Encryption)** con criptografía asimétrica RSA, siguiendo la metodología Spec-Driven Development (SDD).
 
@@ -38,7 +38,7 @@ Las llaves se recuperan de Secrets Manager en el cold start y se mantienen en el
 
 ---
 
-## Arquitectura
+## Architecture
 
 ```mermaid
 graph TD
@@ -106,7 +106,7 @@ sequenceDiagram
 
 ---
 
-## Componentes e Interfaces
+## Components and Interfaces
 
 ### Estructura del Repositorio
 
@@ -253,7 +253,7 @@ Responsabilidades:
 
 ---
 
-## Modelos de Datos
+## Data Models
 
 ### Estructura del Token JWE (JWE Compact Serialization)
 
@@ -331,55 +331,55 @@ async function getKey() {
 
 ---
 
-## Propiedades de Corrección
+## Correctness Properties
 
 *Una propiedad es una característica o comportamiento que debe mantenerse verdadero en todas las ejecuciones válidas de un sistema — esencialmente, una declaración formal sobre lo que el sistema debe hacer. Las propiedades sirven como puente entre las especificaciones legibles por humanos y las garantías de corrección verificables por máquinas.*
 
-### Propiedad 1: Round-Trip con Preservación de Tipos
+### Property 1: Round-Trip con Preservación de Tipos
 
 *Para cualquier* objeto JSON válido y no vacío (incluyendo payloads con strings Unicode, números de punto flotante, arrays anidados y objetos con hasta 10 niveles de profundidad), cifrarlo con la llave pública RSA activa y luego descifrarlo con la llave privada correspondiente del mismo par RSA debe producir un objeto con exactamente los mismos campos, valores y tipos de dato que el payload original (igualdad profunda).
 
-**Valida: Requerimientos 3.1, 4.1, 4.2, 4.4**
+**Validates: Requirements 3.1, 4.1, 4.2, 4.4**
 
-### Propiedad 2: Algoritmos Declarados en el Header JWE
+### Property 2: Algoritmos Declarados en el Header JWE
 
 *Para cualquier* payload JSON válido y no vacío, el token JWE producido por la Lambda_Encriptador debe tener en su header protegido (primera parte, decodificada en base64url) exactamente `"alg": "RSA-OAEP-256"` y `"enc": "A256GCM"`, y el token debe estar compuesto por exactamente 5 partes separadas por puntos.
 
-**Valida: Requerimientos 2.1, 2.2, 2.3**
+**Validates: Requirements 2.1, 2.2, 2.3**
 
-### Propiedad 3: No-Determinismo del Token JWE
+### Property 3: No-Determinismo del Token JWE
 
 *Para cualquier* payload JSON válido y no vacío cifrado dos veces consecutivas con el mismo par RSA, los dos tokens JWE resultantes deben diferir en al menos una de sus 5 partes (garantizado por IV/CEK aleatorio), y ambos tokens deben poder ser descifrados correctamente retornando el payload original con igualdad profunda.
 
-**Valida: Requerimiento 4.3**
+**Validates: Requirements 4.3**
 
-### Propiedad 4: Rechazo de Payloads Inválidos
+### Property 4: Rechazo de Payloads Inválidos
 
 *Para cualquier* valor que no sea un objeto JSON no vacío — incluyendo strings, números, booleanos, null, arrays, y el objeto vacío `{}` — la Lambda_Encriptador debe rechazarlo con HTTP 400 sin producir ningún token.
 
-**Valida: Requerimientos 2.5, 2.6**
+**Validates: Requirements 2.5, 2.6**
 
-### Propiedad 5: Límite de Tamaño del Payload
+### Property 5: Límite de Tamaño del Payload
 
 *Para cualquier* objeto JSON cuyo tamaño serializado supere 256 KB, la Lambda_Encriptador debe rechazarlo con HTTP 400 con el mensaje `"Payload too large: maximum size is 256KB"`, independientemente del contenido del objeto.
 
-**Valida: Requerimiento 2.10**
+**Validates: Requirements 2.10**
 
-### Propiedad 6: Rechazo de Tokens con Formato Inválido
+### Property 6: Rechazo de Tokens con Formato Inválido
 
 *Para cualquier* string que no tenga exactamente 5 partes separadas por puntos (`.`), la Lambda_Desencriptador debe rechazarlo con HTTP 400 con el mensaje `"Invalid token format: must be a valid JWE Compact Serialization"`.
 
-**Valida: Requerimiento 3.6**
+**Validates: Requirements 3.6**
 
-### Propiedad 7: Detección de Tokens Corrompidos
+### Property 7: Detección de Tokens Corrompidos
 
 *Para cualquier* token JWE válido que haya sido modificado en cualquiera de sus partes (ciphertext o authentication tag alterados), la Lambda_Desencriptador debe retornar HTTP 422 con un mensaje de error de integridad, sin revelar el contenido del payload.
 
-**Valida: Requerimiento 3.9**
+**Validates: Requirements 3.9**
 
 ---
 
-## Manejo de Errores
+## Error Handling
 
 ### Estrategia de Clasificación de Errores
 
@@ -481,7 +481,7 @@ Para distinguir key mismatch de integrity failure, se analiza el mensaje del err
 
 ---
 
-## Estrategia de Pruebas
+## Testing Strategy
 
 ### Enfoque Dual: Pruebas Unitarias + Pruebas de Propiedades
 

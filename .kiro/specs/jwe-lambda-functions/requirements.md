@@ -1,6 +1,6 @@
-# Documento de Requerimientos
+# Requirements Document
 
-## Introducción
+## Introduction
 
 Este documento describe los requerimientos para el desarrollo de dos funciones AWS Lambda que implementan cifrado y descifrado de payloads usando el estándar **JWE (JSON Web Encryption)** con criptografía asimétrica RSA. Las funciones forman parte de un sistema de seguridad para proteger datos sensibles en tránsito dentro de una arquitectura serverless en AWS.
 
@@ -11,7 +11,7 @@ Ambas lambdas se desarrollan siguiendo la metodología Spec-Driven Development (
 
 ---
 
-## Glosario
+## Glossary
 
 - **JWE**: JSON Web Encryption. Estándar definido en RFC 7516 para representar contenido cifrado usando estructuras JSON.
 - **JWT**: JSON Web Token. Estándar compacto para transmitir información entre partes como un objeto JSON.
@@ -33,7 +33,7 @@ Ambas lambdas se desarrollan siguiendo la metodología Spec-Driven Development (
 
 ---
 
-## Requerimientos
+## Requirements
 
 ### Requerimiento 1: Generación del Par de Llaves RSA
 
