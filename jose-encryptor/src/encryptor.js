@@ -14,6 +14,7 @@
  *                                              when the handler caches the key in memory.
  * @returns {Promise<string>}                 - The JWE Compact Serialization token (5 dot-separated parts).
  */
+
 async function encryptPayload(payload, publicKeyOrPem) {
   // jose v5 is ESM-only; use dynamic import() from a CommonJS module.
   const { importSPKI, CompactEncrypt } = await import('jose');

@@ -21,6 +21,7 @@ const { importSPKI, CompactEncrypt } = require('jose');
 // Generate a real RSA key pair once for the entire test suite.
 // The public key PEM is what the mock secretsManager will return.
 // ---------------------------------------------------------------------------
+
 const { publicKey: PUBLIC_KEY_PEM } = crypto.generateKeyPairSync('rsa', {
   modulusLength: 2048,
   publicKeyEncoding: { type: 'spki', format: 'pem' },
