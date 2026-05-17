@@ -32,14 +32,17 @@ async function decryptToken(token, privateKeyOrPem) {
       : privateKeyOrPem;
 
   let plaintext;
+  
   try {
     const result = await compactDecrypt(token, privateKey);
     plaintext = result.plaintext;
+  
   } catch (err) {
     // ERR_JWE_DECRYPTION_FAILED covers both key mismatch and AES-GCM tag failure.
     // ERR_JWE_INVALID covers structurally malformed tokens.
     // Both are re-thrown with their original jose error code so the handler
     // can map them to the correct HTTP status (422 vs 400).
+    
     if (
       err.code === 'ERR_JWE_DECRYPTION_FAILED' ||
       err.code === 'ERR_JWE_INVALID'

@@ -9,6 +9,7 @@ const client = new SecretsManagerClient({ region: process.env.AWS_REGION });
  * @param {string} secretName - The name or ARN of the secret to retrieve
  * @returns {Promise<string>} The secret value as a string (PEM format for RSA keys)
  */
+
 async function getSecret(secretName) {
   const command = new GetSecretValueCommand({ SecretId: secretName });
   const response = await client.send(command);

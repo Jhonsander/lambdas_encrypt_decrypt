@@ -15,12 +15,14 @@ let cachedPrivateKey = null;
  * @returns {Promise<CryptoKey>} The imported RSA private key (CryptoKey).
  */
 async function getKey() {
+  
   if (!cachedPrivateKey) {
     const pem = await getSecret(process.env.PRIVATE_KEY_SECRET_NAME);
     // jose v5 is ESM-only; dynamic import() is required from CommonJS.
     const { importPKCS8 } = await import('jose');
     cachedPrivateKey = await importPKCS8(pem, 'RSA-OAEP-256');
   }
+  
   return cachedPrivateKey;
 }
 
