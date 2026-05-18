@@ -75,8 +75,8 @@ Implementación incremental de dos funciones AWS Lambda (`jose-encryptor` y `jos
 - [x] 8. Checkpoint — Ejecutar pruebas unitarias
   - Ejecutar `npx jest --runInBand` en `jose-encryptor/` y `jose-decryptor/`. Todos los casos unitarios deben pasar. Consultar al usuario si surgen dudas.
 
-- [ ] 9. Implementar script generate-keys.js
-  - [ ] 9.1 Implementar `scripts/generate-keys.js`
+- [x] 9. Implementar script generate-keys.js
+  - [x] 9.1 Implementar `scripts/generate-keys.js`
     - Generar par RSA 2048-bit con `crypto.generateKeyPair('rsa', { modulusLength: 2048 })` (promisificado)
     - Exportar llave pública en formato SPKI PEM y llave privada en formato PKCS8 PEM
     - Leer `PUBLIC_KEY_SECRET_NAME` y `PRIVATE_KEY_SECRET_NAME` de variables de entorno
