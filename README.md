@@ -7,6 +7,7 @@
 ![alt text](/images/jose-decryptor%20test.png)
 
 ## Jose-encryptor desplegado en AWS
+![alt text](/images/campos-para-encriptar.png)
 ![alt text](/images/jose-encryptor-funcionando.png)
 ![alt text](/images/resumen-jose-encryptor.png)
 
