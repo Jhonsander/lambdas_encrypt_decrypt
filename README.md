@@ -12,5 +12,6 @@
 ![alt text](/images/resumen-jose-encryptor.png)
 
 ## Jose-decryptor desplegado en AWS
+![alt text](/images/token.png)
 ![alt text](/images/jose-decryptor-funcionando.png)
 ![alt text](/images/resumen-jose-decryptor.png)
