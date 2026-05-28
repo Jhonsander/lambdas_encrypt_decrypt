@@ -1,731 +1,350 @@
-# Documento de Diseño Técnico: jwe-lambda-functions
+# Documento de Diseño: Despliegue JWE Lambda Functions con AWS SAM
 
 ## Overview
 
-Este documento describe el diseño técnico de dos funciones AWS Lambda que implementan cifrado y descifrado de payloads usando el estándar **JWE (JSON Web Encryption)** con criptografía asimétrica RSA, siguiendo la metodología Spec-Driven Development (SDD).
+Este documento describe el diseño técnico para desplegar las funciones Lambda `jose-encryptor` y `jose-decryptor` en AWS usando AWS SAM. El proyecto ya cuenta con el código de las Lambdas completamente implementado y testeado; el trabajo consiste en crear la infraestructura como código (IaC), automatizar la gestión de secretos RSA en AWS Secrets Manager y proveer scripts de verificación post-despliegue.
 
-### Componentes del Sistema
-
-| Componente | Descripción |
-|---|---|
-| `jose-encryptor` | Lambda que recibe un payload JSON y retorna un Token JWE cifrado |
-| `jose-decryptor` | Lambda que recibe un Token JWE y retorna el payload JSON descifrado |
-| `generate-keys` | Script CLI que genera el par RSA y lo almacena en AWS Secrets Manager |
-| AWS Secrets Manager | Almacén seguro para la llave pública y privada RSA en formato PEM |
-
-### Stack Tecnológico
-
-- **Runtime**: Node.js 20.x (LTS)
-- **Librería JWE**: [`jose`](https://github.com/panva/jose) v5.x — implementación robusta de JOSE (JWA, JWE, JWS, JWT) para Node.js
-- **AWS SDK**: `@aws-sdk/client-secrets-manager` v3.x
-- **Testing**: Jest con mocks de AWS SDK
-- **Algoritmo de cifrado de llave**: RSA-OAEP-256
-- **Algoritmo de cifrado de contenido**: AES-256-GCM
-
-### Justificación de Decisiones de Diseño
-
-**¿Por qué `jose`?**
-La librería `jose` es la implementación de referencia más utilizada para JOSE en el ecosistema Node.js. Soporta nativamente RSA-OAEP-256 + AES-256-GCM, maneja la generación de IV/CEK aleatorio automáticamente (garantizando no-determinismo), y está activamente mantenida con soporte para Web Crypto API.
-
-**¿Por qué RSA-OAEP-256 + AES-256-GCM?**
-RSA-OAEP-256 es el algoritmo asimétrico recomendado por RFC 7518 para cifrado de llaves en JWE. AES-256-GCM provee cifrado autenticado (AEAD), garantizando tanto confidencialidad como integridad del payload, lo que permite detectar tokens corrompidos o modificados.
-
-**¿Por qué AWS Secrets Manager para las llaves?**
-Secrets Manager provee rotación automática, auditoría via CloudTrail, control de acceso granular con IAM, y cifrado en reposo con KMS. Es la práctica recomendada para almacenar material criptográfico en AWS.
-
-**Caché en memoria (warm container)**
-Las llaves se recuperan de Secrets Manager en el cold start y se mantienen en el scope del módulo (fuera del handler). En invocaciones subsecuentes dentro del mismo contenedor, se reutiliza la llave cacheada, reduciendo latencia y llamadas a Secrets Manager.
+El diseño sigue el principio de mínimo privilegio para IAM, usa parámetros SAM para hacer la configuración flexible, y provee un script de setup y uno de prueba de integración para automatizar el ciclo completo.
 
 ---
 
 ## Architecture
 
 ```mermaid
-graph TD
-    Client["Cliente / API Gateway"]
-    Encryptor["jose-encryptor\n(Lambda)"]
-    Decryptor["jose-decryptor\n(Lambda)"]
-    SM["AWS Secrets Manager"]
-    PubKey["Secreto: Llave Pública\n(PUBLIC_KEY_SECRET_NAME)"]
-    PrivKey["Secreto: Llave Privada\n(PRIVATE_KEY_SECRET_NAME)"]
-    Script["generate-keys\n(Script CLI)"]
-
-    Client -->|"POST {payload}"| Encryptor
-    Encryptor -->|"GetSecretValue (cold start)"| SM
-    SM --> PubKey
-    Encryptor -->|"Token JWE"| Client
-
-    Client -->|"POST {token}"| Decryptor
-    Decryptor -->|"GetSecretValue (cold start)"| SM
-    SM --> PrivKey
-    Decryptor -->|"Payload JSON"| Client
-
-    Script -->|"PutSecretValue / CreateSecret"| SM
-    SM --> PubKey
-    SM --> PrivKey
-```
-
-### Flujo de Cifrado (jose-encryptor)
-
-```mermaid
-sequenceDiagram
-    participant C as Cliente
-    participant L as jose-encryptor
-    participant SM as Secrets Manager
-
-    C->>L: Invoke {payload: {...}}
-    alt Cold Start
-        L->>SM: GetSecretValue(PUBLIC_KEY_SECRET_NAME)
-        SM-->>L: PEM Llave Pública
-        L->>L: Importar llave (cache en módulo)
+graph TB
+    subgraph "Pre-despliegue"
+        PEM["public-key.pem\nprivate-key.pem"]
+        SETUP["scripts/setup-secrets.js\n(Setup_Script)"]
+        PEM --> SETUP
+        SETUP --> SM_PUB["Secrets Manager\njwe/public-key"]
+        SETUP --> SM_PRIV["Secrets Manager\njwe/private-key"]
     end
-    L->>L: Validar payload (no vacío, es objeto)
-    L->>L: Validar tamaño ≤ 256 KB
-    L->>L: new CompactEncrypt(payload)\n  .setProtectedHeader({alg, enc})\n  .encrypt(publicKey)
-    L-->>C: {statusCode: 200, body: {token: "..."}}
-```
 
-### Flujo de Descifrado (jose-decryptor)
-
-```mermaid
-sequenceDiagram
-    participant C as Cliente
-    participant L as jose-decryptor
-    participant SM as Secrets Manager
-
-    C->>L: Invoke {token: "a.b.c.d.e"}
-    alt Cold Start
-        L->>SM: GetSecretValue(PRIVATE_KEY_SECRET_NAME)
-        SM-->>L: PEM Llave Privada
-        L->>L: Importar llave (cache en módulo)
+    subgraph "SAM Build & Deploy"
+        TEMPLATE["template.yaml\n(Template_SAM)"]
+        SAM_BUILD["sam build"]
+        SAM_DEPLOY["sam deploy"]
+        TEMPLATE --> SAM_BUILD --> SAM_DEPLOY
     end
-    L->>L: Validar formato token (5 partes)
-    L->>L: compactDecrypt(token, privateKey)
-    L-->>C: {statusCode: 200, body: {payload: {...}}}
+
+    subgraph "AWS Stack desplegado"
+        ROLE_ENC["IAM Role\nEncryptorRole\n(GetSecretValue → jwe/public-key)"]
+        ROLE_DEC["IAM Role\nDecryptorRole\n(GetSecretValue → jwe/private-key)"]
+        
+        LAMBDA_ENC["Lambda\nJoseEncryptorFunction\nnodejs22.x"]
+        LAMBDA_DEC["Lambda\nJoseDecryptorFunction\nnodejs22.x"]
+        
+        ROLE_ENC --> LAMBDA_ENC
+        ROLE_DEC --> LAMBDA_DEC
+        
+        LAMBDA_ENC -->|"GetSecretValue"| SM_PUB
+        LAMBDA_DEC -->|"GetSecretValue"| SM_PRIV
+    end
+
+    subgraph "Post-despliegue"
+        INT_TEST["scripts/integration-test.js\n(Integration_Test)"]
+        INT_TEST -->|"invoke"| LAMBDA_ENC
+        INT_TEST -->|"invoke"| LAMBDA_DEC
+    end
+
+    SAM_DEPLOY --> ROLE_ENC
+    SAM_DEPLOY --> ROLE_DEC
+    SAM_DEPLOY --> LAMBDA_ENC
+    SAM_DEPLOY --> LAMBDA_DEC
 ```
+
+**Flujo de trabajo completo:**
+1. Ejecutar `setup-secrets.js` para subir las claves PEM a Secrets Manager
+2. Ejecutar `sam build` para empaquetar las Lambdas
+3. Ejecutar `sam deploy` para crear/actualizar el stack CloudFormation
+4. Ejecutar `integration-test.js` para verificar el funcionamiento end-to-end
 
 ---
 
 ## Components and Interfaces
 
-### Estructura del Repositorio
+### 1. `template.yaml` (Template_SAM)
 
+Archivo principal de infraestructura SAM. Define todos los recursos AWS.
+
+**Parámetros:**
+| Parámetro | Tipo | Default | Descripción |
+|-----------|------|---------|-------------|
+| `PublicKeySecretName` | String | `jwe/public-key` | Nombre del secreto en Secrets Manager para la clave pública RSA |
+| `PrivateKeySecretName` | String | `jwe/private-key` | Nombre del secreto en Secrets Manager para la clave privada RSA |
+| `Environment` | String | `dev` | Entorno de despliegue (dev/staging/prod) |
+
+**Recursos:**
+- `JoseEncryptorFunction` — AWS::Serverless::Function
+- `JoseDecryptorFunction` — AWS::Serverless::Function
+- `EncryptorRole` — AWS::IAM::Role (creado implícitamente por SAM con políticas inline)
+- `DecryptorRole` — AWS::IAM::Role (creado implícitamente por SAM con políticas inline)
+
+**Outputs:**
+- `JoseEncryptorFunctionArn` — ARN de la función encriptadora
+- `JoseDecryptorFunctionArn` — ARN de la función desencriptadora
+
+### 2. `samconfig.toml`
+
+Archivo de configuración para `sam deploy`. Evita tener que pasar flags en cada despliegue.
+
+**Secciones:**
+- `[default.deploy.parameters]` — configuración por defecto para el entorno de desarrollo
+
+### 3. `scripts/setup-secrets.js` (Setup_Script)
+
+Script Node.js que lee los archivos PEM y los sube a AWS Secrets Manager.
+
+**Interfaz de línea de comandos:**
 ```
-lambdas_encryp_decrypt/
-├── .kiro/
-│   └── specs/
-│       └── jwe-lambda-functions/
-│           ├── requirements.md
-│           ├── design.md
-│           └── tasks.md
-├── jose-encryptor/
-│   ├── src/
-│   │   ├── handler.js          # Entry point Lambda
-│   │   ├── encryptor.js        # Lógica de cifrado JWE
-│   │   └── secretsManager.js   # Cliente AWS Secrets Manager
-│   ├── tests/
-│   │   └── handler.test.js     # Pruebas unitarias con mocks
-│   ├── package.json
-│   └── README.md
-├── jose-decryptor/
-│   ├── src/
-│   │   ├── handler.js          # Entry point Lambda
-│   │   ├── decryptor.js        # Lógica de descifrado JWE
-│   │   └── secretsManager.js   # Cliente AWS Secrets Manager
-│   ├── tests/
-│   │   └── handler.test.js     # Pruebas unitarias con mocks
-│   ├── package.json
-│   └── README.md
-└── scripts/
-    ├── generate-keys.js        # Script CLI generación de par RSA
-    └── package.json
-```
-
-### Interfaz del Handler: jose-encryptor
-
-**Evento de entrada:**
-```json
-{
-  "payload": {
-    "userId": "123",
-    "data": "sensitive information"
-  }
-}
+node scripts/setup-secrets.js [--public-key-name <nombre>] [--private-key-name <nombre>] [--region <región>]
 ```
 
-**Respuesta exitosa (HTTP 200):**
-```json
-{
-  "statusCode": 200,
-  "body": "{\"token\": \"eyJhbGciOiJSU0EtT0FFUC0yNTYiLCJlbmMiOiJBMjU2R0NNIn0.abc.def.ghi.jkl\"}"
-}
+**Variables de entorno alternativas:**
+- `PUBLIC_KEY_SECRET_NAME` (default: `jwe/public-key`)
+- `PRIVATE_KEY_SECRET_NAME` (default: `jwe/private-key`)
+- `AWS_REGION` (default: `us-east-1`)
+
+**Lógica de upsert:**
+```
+para cada clave (pública, privada):
+  1. Leer archivo PEM (falla inmediata si no existe)
+  2. Intentar CreateSecret
+     - Si ResourceExistsException → llamar UpdateSecretValue
+     - Si otro error → mostrar error y salir con código != 0
+  3. Mostrar ARN del secreto creado/actualizado
 ```
 
-**Respuestas de error:**
-| Código | Condición | Mensaje |
-|---|---|---|
-| 400 | Campo `payload` ausente | `"Missing required field: payload"` |
-| 400 | `payload` vacío `{}`, no-objeto, o inválido | `"Invalid payload: must be a non-empty valid JSON object"` |
-| 400 | Payload > 256 KB | `"Payload too large: maximum size is 256KB"` |
-| 500 | Fallo al recuperar llave pública | `"Failed to retrieve encryption key"` |
-| 500 | Fallo en proceso de cifrado | `"Encryption failed"` |
+**Dependencias:** `@aws-sdk/client-secrets-manager`, `fs`, `path`, `process`
 
-### Interfaz del Handler: jose-decryptor
+### 4. `scripts/integration-test.js` (Integration_Test)
 
-**Evento de entrada:**
-```json
-{
-  "token": "eyJhbGciOiJSU0EtT0FFUC0yNTYiLCJlbmMiOiJBMjU2R0NNIn0.abc.def.ghi.jkl"
-}
+Script Node.js que verifica el flujo completo post-despliegue usando el AWS SDK.
+
+**Interfaz de línea de comandos:**
+```
+node scripts/integration-test.js [--stack-name <nombre>] [--region <región>]
 ```
 
-**Respuesta exitosa (HTTP 200):**
-```json
-{
-  "statusCode": 200,
-  "body": "{\"payload\": {\"userId\": \"123\", \"data\": \"sensitive information\"}}"
-}
+**Variables de entorno alternativas:**
+- `STACK_NAME` (default: `jwe-lambda-functions`)
+- `AWS_REGION` (default: `us-east-1`)
+
+**Flujo de prueba:**
+```
+1. Derivar nombres de funciones desde el stack name
+2. Invocar JoseEncryptorFunction con payload de prueba
+3. Verificar statusCode == 200 y formato JWE del token (5 partes)
+4. Si token inválido → mostrar error y salir con código != 0
+5. Invocar JoseDecryptorFunction con el token obtenido
+6. Verificar statusCode == 200 y equivalencia del payload
+7. Mostrar mensaje de éxito
 ```
 
-**Respuestas de error:**
-| Código | Condición | Mensaje |
-|---|---|---|
-| 400 | Campo `token` ausente | `"Missing required field: token"` |
-| 400 | Formato JWE inválido (≠ 5 partes) o algoritmos incorrectos | `"Invalid token format: must be a valid JWE Compact Serialization"` |
-| 422 | Llave privada no corresponde al token | `"Decryption failed: key mismatch"` |
-| 422 | Token corrompido (fallo integridad AES-GCM) | `"Decryption failed: token integrity check failed"` |
-| 500 | Fallo al recuperar llave privada | `"Failed to retrieve decryption key"` |
-| 500 | Fallo de descifrado por otra causa | `"Decryption failed"` |
-
-### Módulo: secretsManager.js (compartido por ambas lambdas)
-
-```javascript
-// Interfaz del módulo
-async function getSecret(secretName: string): Promise<string>
-```
-
-Responsabilidades:
-- Instanciar `SecretsManagerClient` con la región de `AWS_REGION`
-- Ejecutar `GetSecretValueCommand`
-- Retornar el valor del secreto como string (PEM)
-- Propagar errores para que el handler los capture
-
-### Módulo: encryptor.js
-
-```javascript
-// Interfaz del módulo
-async function encryptPayload(payload: object, publicKeyPem: string): Promise<string>
-```
-
-Responsabilidades:
-- Importar la llave pública PEM con `jose.importSPKI(pem, 'RSA-OAEP-256')`
-- Serializar el payload a `Uint8Array` via `TextEncoder`
-- Construir y ejecutar `new CompactEncrypt(plaintext).setProtectedHeader({alg: 'RSA-OAEP-256', enc: 'A256GCM'}).encrypt(publicKey)`
-- Retornar el token JWE como string
-
-### Módulo: decryptor.js
-
-```javascript
-// Interfaz del módulo
-async function decryptToken(token: string, privateKeyPem: string): Promise<object>
-```
-
-Responsabilidades:
-- Importar la llave privada PEM con `jose.importPKCS8(pem, 'RSA-OAEP-256')`
-- Ejecutar `compactDecrypt(token, privateKey)`
-- Decodificar el plaintext con `TextDecoder` y parsear como JSON
-- Propagar errores diferenciados (key mismatch vs. integrity failure vs. otros)
-
-### Script: generate-keys.js
-
-```javascript
-// Flujo principal
-async function main(): Promise<void>
-```
-
-Responsabilidades:
-1. Generar par RSA 2048-bit con `crypto.generateKeyPair('rsa', { modulusLength: 2048 })`
-2. Exportar llave pública en formato SPKI PEM
-3. Exportar llave privada en formato PKCS8 PEM
-4. Leer `PUBLIC_KEY_SECRET_NAME` y `PRIVATE_KEY_SECRET_NAME` de variables de entorno
-5. Almacenar/sobreescribir cada llave en Secrets Manager (CreateSecret o UpdateSecret)
-6. Emitir mensajes de éxito/error y terminar con código de salida apropiado
+**Dependencias:** `@aws-sdk/client-lambda`, `@aws-sdk/client-cloudformation`
 
 ---
 
 ## Data Models
 
-### Estructura del Token JWE (JWE Compact Serialization)
-
-```
-BASE64URL(JWE Protected Header) . BASE64URL(JWE Encrypted Key) . BASE64URL(JWE Initialization Vector) . BASE64URL(JWE Ciphertext) . BASE64URL(JWE Authentication Tag)
-```
-
-**JWE Protected Header decodificado:**
+### Evento de invocación — JoseEncryptorFunction
 ```json
 {
-  "alg": "RSA-OAEP-256",
-  "enc": "A256GCM"
-}
-```
-
-### Modelo de Secreto en AWS Secrets Manager
-
-| Secreto | Variable de Entorno | Tipo | Formato |
-|---|---|---|---|
-| Llave Pública RSA | `PUBLIC_KEY_SECRET_NAME` | `SecretString` | PEM (SPKI) |
-| Llave Privada RSA | `PRIVATE_KEY_SECRET_NAME` | `SecretString` | PEM (PKCS8) |
-
-**Ejemplo de valor PEM (llave pública):**
-```
------BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA...
------END PUBLIC KEY-----
-```
-
-### Variables de Entorno por Lambda
-
-**jose-encryptor:**
-| Variable | Descripción | Ejemplo |
-|---|---|---|
-| `PUBLIC_KEY_SECRET_NAME` | Nombre del secreto en Secrets Manager | `jwe/public-key` |
-| `AWS_REGION` | Región AWS | `us-east-1` |
-
-**jose-decryptor:**
-| Variable | Descripción | Ejemplo |
-|---|---|---|
-| `PRIVATE_KEY_SECRET_NAME` | Nombre del secreto en Secrets Manager | `jwe/private-key` |
-| `AWS_REGION` | Región AWS | `us-east-1` |
-
-### Modelo de Caché en Memoria
-
-```javascript
-// Scope de módulo (fuera del handler) — persiste entre invocaciones warm
-let cachedPublicKey = null;   // jose-encryptor
-let cachedPrivateKey = null;  // jose-decryptor
-```
-
-El patrón de inicialización lazy garantiza que la llave se recupera exactamente una vez por contenedor de ejecución:
-
-```javascript
-async function getKey() {
-  if (!cachedKey) {
-    const pem = await getSecret(process.env.KEY_SECRET_NAME);
-    cachedKey = await importKey(pem);
+  "payload": {
+    "campo1": "valor1",
+    "campo2": 123
   }
-  return cachedKey;
 }
 ```
 
-### Estructura de Respuesta Lambda (API Gateway Proxy Integration)
-
-```javascript
+### Respuesta — JoseEncryptorFunction (éxito)
+```json
 {
-  statusCode: number,          // 200 | 400 | 422 | 500
-  headers: {
-    'Content-Type': 'application/json'
-  },
-  body: string                 // JSON.stringify({token: ...} | {payload: ...} | {error: ...})
+  "statusCode": 200,
+  "headers": { "Content-Type": "application/json" },
+  "body": "{\"token\": \"eyJ....<base64url>....<base64url>....<base64url>....<base64url>\"}"
 }
+```
+
+### Evento de invocación — JoseDecryptorFunction
+```json
+{
+  "token": "eyJ....<base64url>....<base64url>....<base64url>....<base64url>"
+}
+```
+
+### Respuesta — JoseDecryptorFunction (éxito)
+```json
+{
+  "statusCode": 200,
+  "headers": { "Content-Type": "application/json" },
+  "body": "{\"payload\": {\"campo1\": \"valor1\", \"campo2\": 123}}"
+}
+```
+
+### Estructura del secreto en Secrets Manager
+```
+SecretId:    jwe/public-key  (o el nombre configurado)
+SecretString: "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n"
+```
+
+### Estructura del template SAM (esquema simplificado)
+```yaml
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  PublicKeySecretName:  { Type: String, Default: jwe/public-key }
+  PrivateKeySecretName: { Type: String, Default: jwe/private-key }
+  Environment:          { Type: String, Default: dev }
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Timeout: 10
+    MemorySize: 256
+
+Resources:
+  JoseEncryptorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: jose-encryptor/
+      Handler: src/handler.handler
+      Environment:
+        Variables:
+          PUBLIC_KEY_SECRET_NAME: !Ref PublicKeySecretName
+      Policies:
+        - Statement:
+            Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${PublicKeySecretName}*"
+
+  JoseDecryptorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: jose-decryptor/
+      Handler: src/handler.handler
+      Environment:
+        Variables:
+          PRIVATE_KEY_SECRET_NAME: !Ref PrivateKeySecretName
+      Policies:
+        - Statement:
+            Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${PrivateKeySecretName}*"
+
+Outputs:
+  JoseEncryptorFunctionArn:
+    Value: !GetAtt JoseEncryptorFunction.Arn
+  JoseDecryptorFunctionArn:
+    Value: !GetAtt JoseDecryptorFunction.Arn
 ```
 
 ---
 
 ## Correctness Properties
 
-*Una propiedad es una característica o comportamiento que debe mantenerse verdadero en todas las ejecuciones válidas de un sistema — esencialmente, una declaración formal sobre lo que el sistema debe hacer. Las propiedades sirven como puente entre las especificaciones legibles por humanos y las garantías de corrección verificables por máquinas.*
+El análisis de prework confirma que **property-based testing no aplica** a este feature. Las razones son:
 
-### Property 1: Round-Trip con Preservación de Tipos
+1. El `template.yaml` es configuración declarativa IaC (SAM/CloudFormation), no una función con inputs/outputs variables. Las verificaciones son smoke tests estáticos.
+2. Los scripts de setup e integración interactúan principalmente con servicios externos (AWS SDK). La lógica de negocio propia es mínima y mejor cubierta con tests de ejemplo y mocks.
+3. La lógica de cifrado/descifrado JWE (el código con propiedades universales interesantes) ya está completamente testeada con unit tests y property tests en las Lambdas individuales (`jose-encryptor/tests/` y `jose-decryptor/tests/`).
 
-*Para cualquier* objeto JSON válido y no vacío (incluyendo payloads con strings Unicode, números de punto flotante, arrays anidados y objetos con hasta 10 niveles de profundidad), cifrarlo con la llave pública RSA activa y luego descifrarlo con la llave privada correspondiente del mismo par RSA debe producir un objeto con exactamente los mismos campos, valores y tipos de dato que el payload original (igualdad profunda).
+### Property 1: Upsert de secretos es idempotente
 
-**Validates: Requirements 3.1, 4.1, 4.2, 4.4**
+*Para cualquier* nombre de secreto y contenido PEM válido, ejecutar el Setup_Script dos veces consecutivas debe resultar en el mismo estado final en Secrets Manager (el secreto existe con el valor correcto), sin errores en la segunda ejecución.
 
-### Property 2: Algoritmos Declarados en el Header JWE
-
-*Para cualquier* payload JSON válido y no vacío, el token JWE producido por la Lambda_Encriptador debe tener en su header protegido (primera parte, decodificada en base64url) exactamente `"alg": "RSA-OAEP-256"` y `"enc": "A256GCM"`, y el token debe estar compuesto por exactamente 5 partes separadas por puntos.
-
-**Validates: Requirements 2.1, 2.2, 2.3**
-
-### Property 3: No-Determinismo del Token JWE
-
-*Para cualquier* payload JSON válido y no vacío cifrado dos veces consecutivas con el mismo par RSA, los dos tokens JWE resultantes deben diferir en al menos una de sus 5 partes (garantizado por IV/CEK aleatorio), y ambos tokens deben poder ser descifrados correctamente retornando el payload original con igualdad profunda.
-
-**Validates: Requirements 4.3**
-
-### Property 4: Rechazo de Payloads Inválidos
-
-*Para cualquier* valor que no sea un objeto JSON no vacío — incluyendo strings, números, booleanos, null, arrays, y el objeto vacío `{}` — la Lambda_Encriptador debe rechazarlo con HTTP 400 sin producir ningún token.
-
-**Validates: Requirements 2.5, 2.6**
-
-### Property 5: Límite de Tamaño del Payload
-
-*Para cualquier* objeto JSON cuyo tamaño serializado supere 256 KB, la Lambda_Encriptador debe rechazarlo con HTTP 400 con el mensaje `"Payload too large: maximum size is 256KB"`, independientemente del contenido del objeto.
-
-**Validates: Requirements 2.10**
-
-### Property 6: Rechazo de Tokens con Formato Inválido
-
-*Para cualquier* string que no tenga exactamente 5 partes separadas por puntos (`.`), la Lambda_Desencriptador debe rechazarlo con HTTP 400 con el mensaje `"Invalid token format: must be a valid JWE Compact Serialization"`.
-
-**Validates: Requirements 3.6**
-
-### Property 7: Detección de Tokens Corrompidos
-
-*Para cualquier* token JWE válido que haya sido modificado en cualquiera de sus partes (ciphertext o authentication tag alterados), la Lambda_Desencriptador debe retornar HTTP 422 con un mensaje de error de integridad, sin revelar el contenido del payload.
-
-**Validates: Requirements 3.9**
+**Validates: Requirements 3.3**
 
 ---
 
 ## Error Handling
 
-### Estrategia de Clasificación de Errores
+### Template SAM
+- Los errores de validación del template se detectan con `sam validate` antes del despliegue.
+- Los errores de despliegue CloudFormation hacen rollback automático al estado anterior.
+- Los ARNs de secretos usan wildcard `*` al final para cubrir el sufijo aleatorio que AWS añade a los nombres de secretos.
 
-Los errores se clasifican en tres categorías según su origen y naturaleza:
+### Setup Script (`setup-secrets.js`)
+| Condición de error | Comportamiento |
+|-------------------|----------------|
+| Archivo PEM no encontrado | `console.error` + `process.exit(1)` inmediato |
+| `ResourceExistsException` al crear secreto | Reintentar con `UpdateSecretValue` |
+| Error de AWS SDK (permisos, red, etc.) | `console.error` con mensaje descriptivo + `process.exit(1)` |
+| Credenciales AWS no configuradas | Error propagado del SDK + `process.exit(1)` |
 
-```
-Errores de Validación (4xx) — Responsabilidad del cliente
-├── 400: Payload/token ausente, formato inválido, tamaño excedido
-└── 422: Fallo de integridad o mismatch de llave (token semánticamente inválido)
+### Integration Test (`integration-test.js`)
+| Condición de error | Comportamiento |
+|-------------------|----------------|
+| Stack no encontrado | `console.error` + `process.exit(1)` |
+| Lambda invocación falla (FunctionError) | Mostrar payload de error + `process.exit(1)` |
+| `statusCode` != 200 en respuesta | Mostrar body de error + `process.exit(1)` |
+| Token JWE con formato inválido | Mostrar error de formato + `process.exit(1)` (no invocar decryptor) |
+| Payload desencriptado no equivalente al original | Mostrar diferencia + `process.exit(1)` |
 
-Errores de Infraestructura (5xx) — Responsabilidad del sistema
-├── 500: Fallo en Secrets Manager (permisos, red, secreto no encontrado)
-└── 500: Fallo inesperado en cifrado/descifrado
-```
-
-### Manejo de Errores en jose-encryptor
-
-```javascript
-exports.handler = async (event) => {
-  try {
-    // 1. Validación de entrada
-    if (!event.payload) return error(400, 'Missing required field: payload');
-    if (!isValidPayload(event.payload)) return error(400, 'Invalid payload: must be a non-empty valid JSON object');
-    if (isOversized(event.payload)) return error(400, 'Payload too large: maximum size is 256KB');
-
-    // 2. Recuperación de llave (con caché)
-    let publicKey;
-    try {
-      publicKey = await getCachedPublicKey();
-    } catch (e) {
-      return error(500, 'Failed to retrieve encryption key');
-    }
-
-    // 3. Cifrado
-    try {
-      const token = await encryptPayload(event.payload, publicKey);
-      return success({ token });
-    } catch (e) {
-      return error(500, 'Encryption failed');
-    }
-  } catch (e) {
-    return error(500, 'Encryption failed');
-  }
-};
-```
-
-### Manejo de Errores en jose-decryptor
-
-La librería `jose` lanza errores tipados que permiten distinguir entre:
-- `JWEDecryptionFailed` — fallo de integridad AES-GCM o llave incorrecta
-- `JWEInvalid` — formato de token inválido
-- Otros errores — fallo genérico
-
-```javascript
-exports.handler = async (event) => {
-  try {
-    // 1. Validación de entrada
-    if (!event.token) return error(400, 'Missing required field: token');
-    if (!isValidJWEFormat(event.token)) return error(400, 'Invalid token format: must be a valid JWE Compact Serialization');
-
-    // 2. Recuperación de llave (con caché)
-    let privateKey;
-    try {
-      privateKey = await getCachedPrivateKey();
-    } catch (e) {
-      return error(500, 'Failed to retrieve decryption key');
-    }
-
-    // 3. Descifrado con manejo diferenciado
-    try {
-      const payload = await decryptToken(event.token, privateKey);
-      return success({ payload });
-    } catch (e) {
-      if (isKeyMismatch(e)) return error(422, 'Decryption failed: key mismatch');
-      if (isIntegrityFailure(e)) return error(422, 'Decryption failed: token integrity check failed');
-      return error(500, 'Decryption failed');
-    }
-  } catch (e) {
-    return error(500, 'Decryption failed');
-  }
-};
-```
-
-### Detección de Errores jose Específicos
-
-La librería `jose` expone errores con la propiedad `code`:
-- `ERR_JWE_DECRYPTION_FAILED` → HTTP 422 (key mismatch o integridad)
-- `ERR_JWE_INVALID` → HTTP 400 (formato inválido)
-
-Para distinguir key mismatch de integrity failure, se analiza el mensaje del error o se intenta la validación del header antes del descifrado.
-
-### Manejo de Errores en generate-keys.js
-
-```javascript
-// Errores de generación criptográfica → exit(1) + mensaje identificando etapa
-// Errores de Secrets Manager → exit(1) + nombre del secreto + causa AWS
-// Éxito → exit(0) + confirmación de almacenamiento
-```
+### Lambdas (comportamiento existente, sin cambios)
+Las Lambdas ya manejan sus propios errores internamente y devuelven respuestas HTTP-style con `statusCode` apropiado (400, 422, 500).
 
 ---
 
 ## Testing Strategy
 
-### Enfoque Dual: Pruebas Unitarias + Pruebas de Propiedades
+Este feature es principalmente infraestructura como código (IaC) y scripts de automatización. El análisis de prework confirma que **property-based testing no aplica** porque:
 
-Las pruebas se organizan en dos capas complementarias:
+- El `template.yaml` es configuración declarativa, no lógica con inputs variables.
+- Los scripts de setup e integración interactúan principalmente con servicios externos (AWS SDK).
+- La lógica de negocio (cifrado/descifrado JWE) ya está testeada con unit tests y property tests en las Lambdas individuales.
 
-1. **Pruebas unitarias (Jest)**: Verifican comportamientos específicos, casos de error concretos, y la integración entre módulos con mocks de AWS.
-2. **Pruebas de propiedades (fast-check + Jest)**: Verifican propiedades universales sobre el espacio de inputs, ejecutando mínimo 100 iteraciones por propiedad.
+### Estrategia de testing por componente
 
-### Pruebas Unitarias (Jest)
+**1. `template.yaml` — Smoke tests (validación estática)**
 
-**jose-encryptor — casos cubiertos:**
-- ✅ Payload válido → HTTP 200 con token de 5 partes
-- ✅ Evento sin campo `payload` → HTTP 400
-- ✅ `payload` es string → HTTP 400
-- ✅ `payload` es número → HTTP 400
-- ✅ `payload` es array → HTTP 400
-- ✅ `payload` es null → HTTP 400
-- ✅ `payload` es `{}` → HTTP 400
-- ✅ Payload > 256 KB → HTTP 400
-- ✅ Fallo simulado en Secrets Manager → HTTP 500
+Usar `sam validate` y parseo YAML para verificar:
+- Existencia de los dos recursos Lambda con runtime correcto
+- Handlers configurados correctamente
+- Variables de entorno presentes
+- Parámetros SAM definidos
+- Políticas IAM con acciones y recursos correctos
+- Timeout ≥ 10s y MemorySize ≥ 256MB para cada función
 
-**jose-decryptor — casos cubiertos:**
-- ✅ Token JWE válido → HTTP 200 con payload original (deep equal)
-- ✅ Evento sin campo `token` → HTTP 400
-- ✅ Token con 4 partes → HTTP 400
-- ✅ Token con 6 partes → HTTP 400
-- ✅ Token cifrado con llave diferente → HTTP 422
-- ✅ Token corrompido → HTTP 422
-- ✅ Fallo simulado en Secrets Manager → HTTP 500
+Herramienta: `sam validate --lint` + script de validación YAML en Node.js
 
-**Estrategia de mocking:**
-```javascript
-// jest.mock para @aws-sdk/client-secrets-manager
-jest.mock('@aws-sdk/client-secrets-manager', () => ({
-  SecretsManagerClient: jest.fn().mockImplementation(() => ({
-    send: jest.fn().mockResolvedValue({ SecretString: mockPemKey })
-  })),
-  GetSecretValueCommand: jest.fn()
-}));
-```
+**2. `scripts/setup-secrets.js` — Unit tests con mocks**
 
-### Pruebas de Propiedades (fast-check)
+Usar Jest con mocks del AWS SDK y del módulo `fs`:
+- Archivo PEM existe → llama `CreateSecret` con el contenido correcto
+- Archivo PEM no existe → sale con código 1 sin llamar al SDK
+- Secreto ya existe (`ResourceExistsException`) → llama `UpdateSecretValue`
+- Error de AWS SDK → sale con código 1 y muestra mensaje descriptivo
+- Argumentos de CLI y variables de entorno → nombres de secretos correctos
 
-La librería `fast-check` es la elección estándar para property-based testing en el ecosistema JavaScript/TypeScript. Genera inputs aleatorios y ejecuta cada propiedad mínimo 100 veces.
+**3. `scripts/integration-test.js` — Unit tests con mocks + Integration test**
 
-**Configuración:**
-```javascript
-import fc from 'fast-check';
+Unit tests con mocks del AWS SDK:
+- Respuesta exitosa del encryptor → invoca decryptor con el token
+- Token con formato inválido → no invoca decryptor, sale con código 1
+- Payload desencriptado equivalente al original → muestra éxito
+- Cualquier error → sale con código 1
 
-// Mínimo 100 iteraciones por propiedad
-fc.configureGlobal({ numRuns: 100 });
-```
+Integration test (requiere AWS real, ejecutar manualmente post-despliegue):
+- Flujo completo: encriptar payload → desencriptar → verificar equivalencia
 
-**Generadores de datos:**
+**4. Despliegue SAM — Integration test**
 
-```javascript
-// Generador de payload JSON válido y no vacío
-const validPayloadArb = fc.record({
-  // Al menos un campo requerido
-  id: fc.string(),
-  value: fc.oneof(fc.string(), fc.integer(), fc.boolean(), fc.constant(null))
-}, { withDeletedKeys: false });
+Ejecutar `sam build` y `sam deploy` en un entorno AWS de prueba y verificar:
+- Build exitoso (código de salida 0)
+- Stack creado/actualizado sin errores
+- Outputs de CloudFormation contienen los ARNs de las funciones
+- Permisos IAM: cada Lambda solo puede acceder a su propio secreto
 
-// Generador de payload con tipos mixtos
-const richPayloadArb = fc.dictionary(
-  fc.string({ minLength: 1 }),
-  fc.jsonValue()  // string, number, boolean, null, array, nested object
-);
-
-// Generador de payload con Unicode y floats
-const unicodePayloadArb = fc.record({
-  text: fc.fullUnicodeString(),
-  num: fc.float({ noNaN: true }),
-  nested: fc.record({ deep: fc.string() })
-});
-```
-
-**Implementación de propiedades:**
-
-```javascript
-// Feature: jwe-lambda-functions, Property 1: Round-trip con preservación de tipos
-test('Property 1: Round-trip preserva payload original con todos los tipos de dato', async () => {
-  // Generador rico: Unicode, floats, arrays anidados, objetos hasta 10 niveles
-  const deepPayloadArb = fc.dictionary(
-    fc.string({ minLength: 1 }),
-    fc.oneof(
-      fc.fullUnicodeString(),
-      fc.float({ noNaN: true }),
-      fc.boolean(),
-      fc.constant(null),
-      fc.array(fc.jsonValue(), { maxLength: 5 }),
-      fc.dictionary(fc.string({ minLength: 1 }), fc.jsonValue(), { maxKeys: 3 })
-    ),
-    { minKeys: 1, maxKeys: 10 }
-  );
-  await fc.assert(
-    fc.asyncProperty(deepPayloadArb, async (payload) => {
-      const encryptResult = await handler_encryptor({ payload });
-      expect(encryptResult.statusCode).toBe(200);
-      const { token } = JSON.parse(encryptResult.body);
-      const decryptResult = await handler_decryptor({ token });
-      expect(decryptResult.statusCode).toBe(200);
-      const { payload: recovered } = JSON.parse(decryptResult.body);
-      expect(recovered).toEqual(payload);
-    }),
-    { numRuns: 100 }
-  );
-});
-
-// Feature: jwe-lambda-functions, Property 2: Algoritmos declarados en el header JWE
-test('Property 2: Token JWE declara algoritmos correctos y tiene 5 partes', async () => {
-  await fc.assert(
-    fc.asyncProperty(validPayloadArb, async (payload) => {
-      const result = await handler_encryptor({ payload });
-      expect(result.statusCode).toBe(200);
-      const { token } = JSON.parse(result.body);
-      const parts = token.split('.');
-      expect(parts).toHaveLength(5);
-      const header = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8'));
-      expect(header.alg).toBe('RSA-OAEP-256');
-      expect(header.enc).toBe('A256GCM');
-    }),
-    { numRuns: 100 }
-  );
-});
-
-// Feature: jwe-lambda-functions, Property 3: No-determinismo del token JWE
-test('Property 3: Dos cifrados del mismo payload producen tokens distintos y ambos descifrables', async () => {
-  await fc.assert(
-    fc.asyncProperty(validPayloadArb, async (payload) => {
-      const result1 = await handler_encryptor({ payload });
-      const result2 = await handler_encryptor({ payload });
-      const token1 = JSON.parse(result1.body).token;
-      const token2 = JSON.parse(result2.body).token;
-      expect(token1).not.toBe(token2);
-      const dec1 = await handler_decryptor({ token: token1 });
-      const dec2 = await handler_decryptor({ token: token2 });
-      expect(JSON.parse(dec1.body).payload).toEqual(payload);
-      expect(JSON.parse(dec2.body).payload).toEqual(payload);
-    }),
-    { numRuns: 100 }
-  );
-});
-
-// Feature: jwe-lambda-functions, Property 4: Rechazo de payloads inválidos
-test('Property 4: Valores no-objeto o vacíos son rechazados con HTTP 400', async () => {
-  const invalidArb = fc.oneof(
-    fc.string(),
-    fc.integer(),
-    fc.float(),
-    fc.boolean(),
-    fc.constant(null),
-    fc.array(fc.anything()),
-    fc.constant({})
-  );
-  await fc.assert(
-    fc.asyncProperty(invalidArb, async (invalidPayload) => {
-      const result = await handler_encryptor({ payload: invalidPayload });
-      expect(result.statusCode).toBe(400);
-    }),
-    { numRuns: 100 }
-  );
-});
-
-// Feature: jwe-lambda-functions, Property 5: Límite de tamaño del payload
-test('Property 5: Payloads mayores a 256KB son rechazados con HTTP 400', async () => {
-  // Generar payloads que superen 256KB
-  const oversizedArb = fc.string({ minLength: 300000 }).map(s => ({ data: s }));
-  await fc.assert(
-    fc.asyncProperty(oversizedArb, async (payload) => {
-      const result = await handler_encryptor({ payload });
-      expect(result.statusCode).toBe(400);
-      expect(JSON.parse(result.body).error).toContain('Payload too large');
-    }),
-    { numRuns: 20 } // Menos iteraciones por el tamaño de los datos
-  );
-});
-
-// Feature: jwe-lambda-functions, Property 6: Rechazo de tokens con formato inválido
-test('Property 6: Strings con número incorrecto de partes son rechazados con HTTP 400', async () => {
-  // Generar strings con 1-4 o 6+ partes separadas por puntos
-  const wrongPartsArb = fc.oneof(
-    fc.array(fc.base64String(), { minLength: 1, maxLength: 4 }).map(parts => parts.join('.')),
-    fc.array(fc.base64String(), { minLength: 6, maxLength: 10 }).map(parts => parts.join('.'))
-  );
-  await fc.assert(
-    fc.asyncProperty(wrongPartsArb, async (token) => {
-      const result = await handler_decryptor({ token });
-      expect(result.statusCode).toBe(400);
-    }),
-    { numRuns: 100 }
-  );
-});
-
-// Feature: jwe-lambda-functions, Property 7: Detección de tokens corrompidos
-test('Property 7: Tokens con ciphertext corrompido retornan HTTP 422', async () => {
-  await fc.assert(
-    fc.asyncProperty(validPayloadArb, async (payload) => {
-      const encryptResult = await handler_encryptor({ payload });
-      const { token } = JSON.parse(encryptResult.body);
-      const parts = token.split('.');
-      // Corromper el ciphertext (parte 3, índice 3)
-      const corruptedCiphertext = parts[3].split('').reverse().join('');
-      const corruptedToken = [parts[0], parts[1], parts[2], corruptedCiphertext, parts[4]].join('.');
-      const result = await handler_decryptor({ token: corruptedToken });
-      expect(result.statusCode).toBe(422);
-    }),
-    { numRuns: 100 }
-  );
-});
-```
-
-### Dependencias de Desarrollo
-
-**jose-encryptor/package.json y jose-decryptor/package.json:**
-```json
-{
-  "devDependencies": {
-    "jest": "^29.0.0",
-    "fast-check": "^3.0.0"
-  },
-  "dependencies": {
-    "jose": "^5.0.0",
-    "@aws-sdk/client-secrets-manager": "^3.0.0"
-  }
-}
-```
-
-### Comandos de Prueba
-
+**Comandos de test:**
 ```bash
-# Instalar dependencias
-npm install
+# Unit tests del setup script
+cd scripts && npm test
 
-# Ejecutar todas las pruebas (unitarias + propiedades)
-npm test
+# Validación del template SAM
+sam validate --lint
 
-# Ejecutar en modo single-run (sin watch)
-npx jest --runInBand
+# Integration test post-despliegue (requiere AWS configurado)
+node scripts/integration-test.js --stack-name jwe-lambda-functions
 ```
-
-### Criterios de Completitud de Pruebas
-
-- Todas las pruebas unitarias de los Requerimientos 5.1–5.4 deben pasar
-- Las 4 propiedades de fast-check deben pasar con 100 iteraciones cada una
-- Tiempo total de ejecución < 60 segundos
-- Sin dependencias de conectividad real a AWS (todo mockeado)

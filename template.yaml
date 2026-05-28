@@ -1,0 +1,75 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  JWE Lambda Functions — Funciones Lambda para cifrado y descifrado JWE
+  usando claves RSA almacenadas en AWS Secrets Manager.
+
+Parameters:
+  PublicKeySecretName:
+    Type: String
+    Default: jwe/public-key
+    Description: Nombre del secreto en Secrets Manager para la clave pública RSA
+
+  PrivateKeySecretName:
+    Type: String
+    Default: jwe/private-key
+    Description: Nombre del secreto en Secrets Manager para la clave privada RSA
+
+  Environment:
+    Type: String
+    Default: dev
+    Description: Entorno de despliegue (dev/staging/prod)
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Timeout: 10
+    MemorySize: 256
+
+Resources:
+  JoseEncryptorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: jose-encryptor/
+      Handler: src/handler.handler
+      Description: Función Lambda que cifra un payload JSON usando JWE (RSA-OAEP-256 + AES-256-GCM)
+      Environment:
+        Variables:
+          PUBLIC_KEY_SECRET_NAME: !Ref PublicKeySecretName
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${PublicKeySecretName}*"
+
+  JoseDecryptorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: jose-decryptor/
+      Handler: src/handler.handler
+      Description: Función Lambda que descifra un token JWE Compact Serialization y devuelve el payload JSON original
+      Environment:
+        Variables:
+          PRIVATE_KEY_SECRET_NAME: !Ref PrivateKeySecretName
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${PrivateKeySecretName}*"
+
+Outputs:
+  JoseEncryptorFunctionArn:
+    Description: ARN de la función Lambda JoseEncryptorFunction
+    Value: !GetAtt JoseEncryptorFunction.Arn
+
+  JoseDecryptorFunctionArn:
+    Description: ARN de la función Lambda JoseDecryptorFunction
+    Value: !GetAtt JoseDecryptorFunction.Arn
